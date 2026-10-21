@@ -1,6 +1,18 @@
 const { Event } = require('../event');
 const { compareNestedHeaders } = require('../nestedHeaders');
 
+function debugEnabled() {
+    return String(process.env.GGE_DEBUG || '').trim() === '1';
+}
+
+function redact(value) {
+    return String(value)
+        .replace(/("PW"\s*:\s*")[^"]*(")/gi, '$1***$2')
+        .replace(/("RCT"\s*:\s*")[^"]*(")/gi, '$1***$2')
+        .replace(/("token"\s*:\s*")[^"]*(")/gi, '$1***$2')
+        .replace(/("access_token"\s*:\s*")[^"]*(")/gi, '$1***$2');
+}
+
 class BaseSocket {
     constructor(serverHeader, onSend = null, onOpen = null, onMessage = null, onError = null, onClose = null) {
         this.serverHeader = serverHeader;
@@ -20,7 +32,13 @@ class BaseSocket {
     }
 
     async _onMessage(message) {
-        const response = await this.parseResponse(message);
+        let response;
+        try {
+            response = await this.parseResponse(message);
+        } catch (error) {
+            if (debugEnabled()) console.log(`Unparseable message: ${redact(message).slice(0, 500)}`);
+            return;
+        }
         this._processResponse(response);
         if (this.onMessage) this.onMessage(message);
     }
@@ -45,8 +63,14 @@ class BaseSocket {
 
     send(data) {
         if (this.onSend) this.onSend(data);
-        console.log(`Sending data: ${data}`);
+        if (debugEnabled()) {
+            console.log(`Sending data: ${redact(data).slice(0, 2000)}`);
+        }
         this._send(data);
+    }
+
+    sendRaw(data) {
+        this.send(data);
     }
 
     _sendCommandMessage(data) {
@@ -70,7 +94,7 @@ class BaseSocket {
         const message = { type, conditions, response: null, event };
         this.messages.push(message);
         const result = await event.wait(timeout);
-        this.messages = this.messages.filter(msg => msg !== message);
+        this.messages = this.messages.filter((msg) => msg !== message);
         if (!result) throw new Error('Timeout waiting for response');
         return message.response;
     }
@@ -83,6 +107,10 @@ class BaseSocket {
         return this._waitForResponse('xml', { t, action, r }, timeout);
     }
 
+    waitForAnyResponse(timeout = 5000) {
+        return this._waitForResponse('any', {}, timeout);
+    }
+
     raiseForStatus(response, expectedStatus = 0) {
         if (response.type === 'json' && response.payload.status !== expectedStatus) {
             throw new Error(`Unexpected status: ${response.payload.status}`);
@@ -92,51 +120,96 @@ class BaseSocket {
     async parseResponse(response) {
         if (response.startsWith('<')) {
             const parsed = /<msg t='(.*?)'><body action='(.*?)' r='(.*?)'>(.*?)<\/body><\/msg>/.exec(response);
+            if (!parsed) {
+                return { type: 'raw', payload: { raw: response } };
+            }
             return {
                 type: 'xml',
                 payload: {
                     t: parsed[1],
                     action: parsed[2],
                     r: parsed[3],
-                    data: parsed[4]
-                }
+                    data: parsed[4],
+                },
             };
-        } else {
-            const parsed = response.split('%').filter(Boolean);
-            const payload = {
-                command: parsed[1],
-                status: +parsed[3],
-                data: parsed.length > 4 ? parsed.slice(4).join('%') : null
-            };
-            if (payload.data && payload.data.startsWith('{')) {
-                payload.data = JSON.parse(payload.data);
-            }
-            return { type: 'json', payload };
         }
+
+        const parsed = response.split('%').filter(Boolean);
+        const payload = {
+            command: parsed[1],
+            status: +parsed[3],
+            data: parsed.length > 4 ? parsed.slice(4).join('%') : null,
+        };
+        if (payload.data && payload.data.startsWith('{')) {
+            try {
+                payload.data = JSON.parse(payload.data);
+            } catch (error) {
+                // Keep the raw string if the payload is not valid JSON.
+            }
+        }
+        return { type: 'json', payload };
+    }
+
+    _matches(message, response) {
+        if (message.type === 'any') return false;
+        if (response.type === 'json' && message.type === 'json') {
+            return (
+                message.conditions.command === response.payload.command &&
+                (message.conditions.data === false ||
+                    (message.conditions.data === true && response.payload.data !== null) ||
+                    message.conditions.data === response.payload.data ||
+                    (typeof response.payload.data === 'object' &&
+                        typeof message.conditions.data === 'object' &&
+                        compareNestedHeaders(message.conditions.data, response.payload.data)))
+            );
+        }
+        if (response.type === 'xml' && message.type === 'xml') {
+            return (
+                message.conditions.t === response.payload.t &&
+                message.conditions.action === response.payload.action &&
+                message.conditions.r === response.payload.r
+            );
+        }
+        return false;
+    }
+
+    _findMessage(response) {
+        const exact = this.messages.find((message) => this._matches(message, response));
+        if (exact) return exact;
+
+        // EN: GGE responses do not always echo the request parameters. For a
+        //     command with no exact match, resolve the oldest waiter for the
+        //     same command (FIFO). This keeps gaa/ksc/gpi working.
+        // ES: Las respuestas de GGE no siempre repiten los parametros del
+        //     request. Si no hay match exacto, resolvemos el waiter mas viejo
+        //     del mismo comando (FIFO). Asi funcionan gaa/ksc/gpi.
+        return this.messages.find((message) => {
+            if (message.type === 'any') return true;
+            if (response.type === 'json' && message.type === 'json') {
+                return message.conditions.command === response.payload.command;
+            }
+            if (response.type === 'xml' && message.type === 'xml') {
+                return (
+                    message.conditions.t === response.payload.t &&
+                    message.conditions.action === response.payload.action
+                );
+            }
+            return false;
+        });
     }
 
     _processResponse(response) {
-        console.log(`Processing response: ${JSON.stringify(response)}`);
-        for (const message of this.messages) {
-            if (
-                (response.type === 'json' && message.type === 'json' &&
-                    message.conditions.command === response.payload.command &&
-                    (message.conditions.data === false ||
-                        (message.conditions.data === true && response.payload.data !== null) ||
-                        message.conditions.data === response.payload.data ||
-                        (typeof response.payload.data === 'object' &&
-                            typeof message.conditions.data === 'object' &&
-                            compareNestedHeaders(message.conditions.data, response.payload.data)))) ||
-                (response.type === 'xml' && message.type === 'xml' &&
-                    message.conditions.t === response.payload.t &&
-                    message.conditions.action === response.payload.action &&
-                    message.conditions.r === response.payload.r)
-            ) {
-                message.response = response;
-                message.event.set();
-                break;
-            }
+        const message = this._findMessage(response);
+        if (!message) return;
+        if (debugEnabled()) {
+            const command =
+                response.type === 'json'
+                    ? `${response.payload.command} status=${response.payload.status}`
+                    : `${response.payload.t}/${response.payload.action}`;
+            console.log(`Response: ${command}`);
         }
+        message.response = response;
+        message.event.set();
     }
 }
 
