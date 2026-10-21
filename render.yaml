@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: empire-api-his1
+    runtime: docker
+    plan: free
+    healthCheckPath: /status
+    envVars:
+      - key: GGE_ZONE
+        value: EmpireEx_25
+      - key: GGE_LANG
+        value: fr
+      - key: GGE_E4K
+        value: "0"
+      - key: GGE_RESPONSE_TIMEOUT_MS
+        value: "10000"
+      - key: GGE_USERNAME
+        sync: false
+      - key: GGE_PASSWORD
+        sync: false
+      - key: API_PATH_SECRET
+        sync: false
