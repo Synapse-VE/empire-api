@@ -137,5 +137,11 @@ The tracker will build `https://host/<secret>/EmpireEx_25/...`. The
 
 ## License / credits
 
-Based on [danadum/empire-api](https://github.com/danadum/empire-api).
-Use it on your own account and at your own risk.
+This project is a custom fork designed to provide full WebSocket relay and multi-server support (specifically for HIS1) for the GGE Tracker ecosystem.
+
+### Credits
+- **Base API**: Originally based on [danadum/empire-api](https://github.com/danadum/empire-api).
+- **Main Tracker**: Huge thanks and credits to [gge-tracker/gge-tracker](https://github.com/gge-tracker/gge-tracker) and its contributors. They are the absolute best and the core engine behind this whole ecosystem.
+
+### Disclaimer
+Use it on your own account and at your own risk. This is an unofficial tool and is not affiliated with Goodgame Studios.
